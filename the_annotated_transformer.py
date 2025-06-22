@@ -1,4 +1,12 @@
-# -*- coding: utf-8 -*-
+# Do not use coding: utf-8
+# Otherwise, from line 1490:
+# if is_interactive_notebook():
+#    # global variables used later in the script
+#    spacy_de, spacy_en = show_example(load_tokenizers)
+#    vocab_src, vocab_tgt = show_example(load_vocab, args=[spacy_de, spacy_en])
+# UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80 in position 37: invalid start byte
+
+#### # -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
@@ -107,6 +115,7 @@
 
 
 # %% id="v1-1MX6oTsp9"
+import sys
 import os
 from os.path import exists
 import torch
@@ -130,7 +139,15 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-
+import torchtext
+import torchdata
+import torchvision
+import pydantic
+import portalocker
+pydantic_version = pydantic.version.version_info().split('\n')[0].strip()
+print(f"Python version: 3.9.0, torch version: {torch.__version__}, torchtext version: {torchtext.__version__}, torchvision version: {torchvision.__version__}, torchdata version: {torchdata.version.__version__}. pandas verscon: {pd.__version__}, altair version: {alt.__version__}",
+      f"spacy version: {spacy.__version__}, {pydantic_version}, GPUtil version: {GPUtil.__version__}, portalocker version: {portalocker.__version__}")
+sys.exit(0)
 # Set to False to skip notebook execution (e.g. for debugging)
 warnings.filterwarnings("ignore")
 RUN_EXAMPLES = True
@@ -1105,7 +1122,7 @@ def example_learning_schedule():
             pd.DataFrame(
                 {
                     "Learning Rate": learning_rates[warmup_idx, :],
-                    "model_size:warmup": ["512:4000", "512:8000", "256:4000"][
+                    "model_size warmup": ["512:4000", "512:8000", "256:4000"][
                         warmup_idx
                     ],
                     "step": range(20000),
@@ -1415,12 +1432,20 @@ def load_tokenizers():
 
 # %% id="t4BszXXJTsqL" tags=[]
 def tokenize(text, tokenizer):
-    return [tok.text for tok in tokenizer.tokenizer(text)]
+    try:
+        return [tok.text for tok in tokenizer.tokenizer(text)]
+    except UnicodeDecodeError:
+        import pdb;pdb.set_trace()
 
 
 def yield_tokens(data_iter, tokenizer, index):
-    for from_to_tuple in data_iter:
-        yield tokenizer(from_to_tuple[index])
+    try:
+        for from_to_tuple in data_iter:
+            yield tokenizer(from_to_tuple[index])
+    except UnicodeDecodeError:
+        import pdb;pdb.set_trace()
+        x = 15
+        y = 16
 
 
 # %% id="jU3kVlV5okC-" tags=[]
@@ -1470,6 +1495,7 @@ def load_vocab(spacy_de, spacy_en):
 if is_interactive_notebook():
     # global variables used later in the script
     spacy_de, spacy_en = show_example(load_tokenizers)
+#   import pdb;pdb.set_trace()
     vocab_src, vocab_tgt = show_example(load_vocab, args=[spacy_de, spacy_en])
 
 
@@ -1623,13 +1649,18 @@ def train_worker(
     config,
     is_distributed=False,
 ):
-    print(f"Train worker process using GPU: {gpu} for training", flush=True)
-    torch.cuda.set_device(gpu)
+    if torch.cuda.is_available():
+        print(f"Train worker process using GPU: {gpu} for training", flush=True)
+        torch.cuda.set_device(gpu)
+        device = gpu
+    else:
+        device = "cpu"
 
     pad_idx = vocab_tgt["<blank>"]
     d_model = 512
     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.cuda(gpu)
+    if torch.cuda.is_available():
+        model.cuda(gpu)
     module = model
     is_main_process = True
     if is_distributed:
@@ -1643,10 +1674,11 @@ def train_worker(
     criterion = LabelSmoothing(
         size=len(vocab_tgt), padding_idx=pad_idx, smoothing=0.1
     )
-    criterion.cuda(gpu)
+    if torch.cuda.is_available():
+        criterion.cuda(gpu)
 
     train_dataloader, valid_dataloader = create_dataloaders(
-        gpu,
+        device,
         vocab_src,
         vocab_tgt,
         spacy_de,
@@ -1667,6 +1699,9 @@ def train_worker(
     )
     train_state = TrainState()
 
+    from time import time
+
+    start = time()
     for epoch in range(config["num_epochs"]):
         if is_distributed:
             train_dataloader.sampler.set_epoch(epoch)
@@ -1685,11 +1720,13 @@ def train_worker(
             train_state=train_state,
         )
 
-        GPUtil.showUtilization()
+        if torch.cuda.is_available():
+            GPUtil.showUtilization()
         if is_main_process:
             file_path = "%s%.2d.pt" % (config["file_prefix"], epoch)
             torch.save(module.state_dict(), file_path)
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print(f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
         model.eval()
@@ -1703,6 +1740,10 @@ def train_worker(
         )
         print(sloss)
         torch.cuda.empty_cache()
+
+    end = time()
+    # takes about 10 hours on AMD laptop
+    print(f"Used {(end - start):.3f} seconds for {config['num_epochs']} epochs training")
 
     if is_main_process:
         file_path = "%sfinal.pt" % config["file_prefix"]
