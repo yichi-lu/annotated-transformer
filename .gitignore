@@ -1,6 +1,13 @@
 *.ipynb
-.ipynb_checkpoints
+.ipynb_checkpoints/
 .data
 *.pt
 __pycache__
 wandb
+pyvenv.cfg
+lib64
+
+bin/
+include/
+lib/
+lib64/
